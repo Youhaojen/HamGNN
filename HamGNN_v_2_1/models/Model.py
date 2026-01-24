@@ -101,6 +101,10 @@ class Model(pl.LightningModule):
         # Track if derivatives are required
         self.requires_derivatives = self.output_module.derivative
 
+        # Lightning buffers for outputs
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
+
     def calculate_loss(self, batch: Dict[str, torch.Tensor], 
                        predictions: Dict[str, torch.Tensor], 
                        mode: str) -> torch.Tensor:
@@ -191,26 +195,26 @@ class Model(pl.LightningModule):
         Dict
             Dictionary containing predictions and targets for logging
         """
-        # Enable gradients if required for derivatives
         torch.set_grad_enabled(self.requires_derivatives)
-        
         self._enable_position_gradients(batch)
         predictions = self(batch)
-        
+    
         val_loss = self.calculate_loss(batch, predictions, 'validation')
         self.log("validation/total_loss", val_loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log_metrics(batch, predictions, 'validation')
-        
-        # Collect outputs for epoch-end processing
+
+        # collect outputs
         outputs_pred, outputs_target = {}, {}
         for loss_dict in self.losses:
             if "target" in loss_dict:
-                outputs_pred[loss_dict["prediction"]] = predictions[loss_dict["prediction"]].detach().cpu().numpy()  
+                outputs_pred[loss_dict["prediction"]] = predictions[loss_dict["prediction"]].detach().cpu().numpy()
                 outputs_target[loss_dict["target"]] = batch[loss_dict["target"]].detach().cpu().numpy()
-                
-        return {'pred': outputs_pred, 'target': outputs_target}
 
-    def validation_epoch_end(self, validation_step_outputs: List[Dict]) -> None:
+        self.validation_step_outputs.append({'pred': outputs_pred, 'target': outputs_target})
+        return val_loss
+
+
+    def on_validation_epoch_end(self) -> None:
         """
         Process and log validation results at the end of an epoch.
         
@@ -219,7 +223,8 @@ class Model(pl.LightningModule):
         validation_step_outputs : List[Dict]
             List of outputs from all validation steps in the epoch
         """
-        self._plot_prediction_vs_target(validation_step_outputs, mode='validation')
+        self._plot_prediction_vs_target(self.validation_step_outputs, mode='validation')
+        self.validation_step_outputs.clear()
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict:
         """
@@ -239,21 +244,19 @@ class Model(pl.LightningModule):
         """
         # Enable gradients if required for derivatives
         torch.set_grad_enabled(self.requires_derivatives)
-        
         self._enable_position_gradients(batch)
-        
+    
         processed_values = None
         if self.post_processing is not None:
             predictions = self.post_processing(batch)
             post_processing_name = type(self.post_processing).__name__.split(".")[-1].lower()
-            
             if post_processing_name == 'epc_output':
                 processed_values = {'epc_mat': predictions['epc_mat'].detach().cpu().numpy()}
             else:
                 raise NotImplementedError(f"Post-processing type {post_processing_name} not implemented")
         else:
             predictions = self(batch)
-        
+
         test_loss = self.calculate_loss(batch, predictions, 'test')
         self.log("test/total_loss", test_loss, on_step=False, on_epoch=True)
         self.log_metrics(batch, predictions, "test")
@@ -262,16 +265,19 @@ class Model(pl.LightningModule):
         outputs_pred, outputs_target = {}, {}
         for loss_dict in self.losses:
             if "target" in loss_dict:
-                outputs_pred[loss_dict["prediction"]] = predictions[loss_dict["prediction"]].detach().cpu().numpy()  
+                outputs_pred[loss_dict["prediction"]] = predictions[loss_dict["prediction"]].detach().cpu().numpy()
                 outputs_target[loss_dict["target"]] = batch[loss_dict["target"]].detach().cpu().numpy()
-                
-        return {
-            'pred': outputs_pred, 
-            'target': outputs_target, 
+    
+        self.test_step_outputs.append({
+            'pred': outputs_pred,
+            'target': outputs_target,
             'processed_values': processed_values
-        }
+        })
+    
+        return test_loss
 
-    def test_epoch_end(self, test_step_outputs: List[Dict]) -> None:
+
+    def on_test_epoch_end(self) -> None:
         """
         Process and log test results at the end of testing.
         
@@ -284,22 +290,25 @@ class Model(pl.LightningModule):
         log_dir = self.trainer.logger.log_dir
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
-        
+
         # Save predictions and targets
-        self._save_predictions_and_targets(test_step_outputs, log_dir)
+        self._save_predictions_and_targets(self.test_step_outputs, log_dir)
         
         # Generate and log scatter plots
-        self._plot_prediction_vs_target(test_step_outputs, mode='test')
-        
+        self._plot_prediction_vs_target(self.test_step_outputs, mode='test')
+    
         # Save post-processed values if available
         if self.post_processing is not None:
             post_processing_name = type(self.post_processing).__name__.split(".")[-1].lower()
-            
             if post_processing_name == 'epc_output':
                 processed_values = np.concatenate([
-                    out['processed_values']["epc_mat"] for out in test_step_outputs if out['processed_values'] is not None
+                    out['processed_values']["epc_mat"] 
+                    for out in self.test_step_outputs if out['processed_values'] is not None
                 ])
                 np.save(os.path.join(log_dir, 'processed_values_epc_mat.npy'), processed_values)
+
+        self.test_step_outputs.clear()
+
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """

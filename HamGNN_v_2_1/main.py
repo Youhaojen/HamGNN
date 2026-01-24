@@ -207,53 +207,50 @@ def build_hamgnn_model(config):
 def setup_trainer(config, callbacks):
     """
     Set up PyTorch Lightning trainer based on configuration.
-    
-    Parameters
-    ----------
-    config : object
-        Configuration object containing trainer parameters.
-        Expected attributes:
-        - setup: Training setup configuration including hardware settings
-        - optim_params: Optimization parameters including epochs and gradient clipping
-        - profiler_params: Configuration for logging and checkpoints
-    
-    callbacks : list
-        List of PyTorch Lightning callbacks for the trainer
-    
-    Returns
-    -------
-    tuple
-        A tuple containing:
-        - trainer: Configured PyTorch Lightning trainer
-        - tb_logger: TensorBoard logger for the trainer
+    Compatible with PyTorch Lightning >= 2.0
     """
-    # Set up TensorBoard logger
+
     tb_logger = TensorBoardLogger(
-        save_dir=config.profiler_params.train_dir, 
-        name="", 
-        default_hp_metric=False
+        save_dir=config.profiler_params.train_dir,
+        name="",
+        default_hp_metric=False,
     )
-    
-    # Configure trainer with parameters from config
+
+    # ---- accelerator / devices ----
+    num_gpus = getattr(config.setup, "num_gpus", 0)
+
+    if num_gpus > 0:
+        accelerator = "gpu"
+        devices = num_gpus
+    else:
+        accelerator = "cpu"
+        devices = 1
+
+    # ---- precision mapping ----
+    precision = config.setup.precision
+    if precision == 16:
+        precision = "16-mixed"
+    elif precision == "bf16":
+        precision = "bf16-mixed"
+
     trainer_params = {
-        'gpus': config.setup.num_gpus, 
-        'precision': config.setup.precision,
-        'callbacks': callbacks,
-        'progress_bar_refresh_rate': 1,
-        'logger': tb_logger,
-        'gradient_clip_val': config.optim_params.gradient_clip_val,
-        'max_epochs': config.optim_params.max_epochs,
-        'default_root_dir': config.profiler_params.train_dir,
-        'min_epochs': config.optim_params.min_epochs,
+        "accelerator": accelerator,
+        "devices": devices,
+        "precision": precision,
+        "callbacks": callbacks,
+        "logger": tb_logger,
+        "gradient_clip_val": config.optim_params.gradient_clip_val,
+        "max_epochs": config.optim_params.max_epochs,
+        "min_epochs": config.optim_params.min_epochs,
+        "default_root_dir": config.profiler_params.train_dir,
     }
-    
-    # Add checkpoint path if resuming training
-    if config.setup.resume and config.setup.checkpoint_path:
-        trainer_params['resume_from_checkpoint'] = config.setup.checkpoint_path
-    
-    # Create the trainer with the configured parameters
+
+    # ---- DDP strategy (optional but recommended) ----
+    if num_gpus > 1:
+        trainer_params["strategy"] = "ddp"
+
     trainer = pl.Trainer(**trainer_params)
-    
+
     return trainer, tb_logger
 
 
@@ -470,7 +467,7 @@ def train_and_evaluate(config):
 
 def HamGNN():
     #torch.autograd.set_detect_anomaly(True)
-    pl.utilities.seed.seed_everything(666)
+    pl.seed_everything(42, workers=True)
     
     # Print version info on master process
     print(soft_logo)
