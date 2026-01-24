@@ -247,7 +247,7 @@ def setup_trainer(config, callbacks):
 
     # ---- DDP strategy (optional but recommended) ----
     if num_gpus > 1:
-        trainer_params["strategy"] = "ddp"
+        trainer_params["strategy"] = "ddp_find_unused_parameters_true"
 
     trainer = pl.Trainer(**trainer_params)
 
@@ -497,4 +497,5 @@ def HamGNN():
 
 if __name__ == '__main__':
     HamGNN()
+
 
