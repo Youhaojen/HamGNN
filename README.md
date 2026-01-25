@@ -67,13 +67,14 @@ According to recent research advances, HamGNN has been extended to a universal m
 
 1. Clone the HamGNN repository:
    ```bash
-   git clone https://github.com/QuantumLab-ZY/HamGNN.git
+   git clone https://github.com/Youhaojen/HamGNN.git
    ```
 
 2. Create an environment using the YAML configuration file provided by HamGNN:
    ```bash
    cd HamGNN
    conda env create -f HamGNN.yaml
+   conda activate HamGNN
    ```
 3. Install PyTorch 2.7 and related code
    ```bash
@@ -87,10 +88,12 @@ According to recent research advances, HamGNN has been extended to a universal m
    ```bash
    python setup.py install
    ```
+   
 5. Verify that the installation was successful:
    ```bash
    python -c "import HamGNN_v_2_1; print('HamGNN installed successfully')"
    ```
+   
 4. To upgrade HamGNN version, first uninstall the old version:
    ```bash
    pip uninstall HamGNN
