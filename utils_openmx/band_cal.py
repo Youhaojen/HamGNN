@@ -3,8 +3,8 @@ Descripttion: The script to calculat bands from the results of HamGNN
 version: 1.0
 Author: Yang Zhong
 Date: 2022-12-20 14:08:52
-LastEditors: Yang Zhong
-LastEditTime: 2024-08-06 10:53:04
+LastEditors: Hao-Jen You
+LastEditTime: 2026-01-25 20:30:00
 '''
 
 import numpy as np
@@ -19,6 +19,133 @@ from utils_openmx.utils import *
 import argparse
 import yaml
 import torch
+
+def parse_kpath_file(filepath):
+    """
+    Parse KPATH.in to extract k-point density, path coordinates, and labels, 
+    while handling path discontinuities in 'H|A' format.
+    """
+    k_path = []
+    raw_labels = []
+    nk_per_segment = 20  # Default value
+    
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Cannot find kpath file: {filepath}")
+
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+        # 1. Read k-point density from the second line
+        try:
+            nk_per_segment = int(lines[1].strip())
+        except (IndexError, ValueError):
+            print("Warning: Could not parse nk from second line, using default.")
+
+        # 2. Parse k-point data (starting from line 5)
+        content_lines = lines[4:]
+        i = 0
+        while i < len(content_lines):
+            line = content_lines[i].strip()
+            
+            # Detect empty line: represents a jump/break in the k-path
+            if not line:
+                if i > 0 and i + 1 < len(content_lines):
+                    prev_parts = content_lines[i-1].strip().split()
+                    next_parts = content_lines[i+1].strip().split()
+                    
+                    if len(prev_parts) >= 4 and len(next_parts) >= 4:
+                        # If coordinates are different, merge labels into 'H|A' format
+                        if not np.allclose([float(x) for x in prev_parts[:3]], 
+                                         [float(x) for x in next_parts[:3]]):
+                            combined = f"{prev_parts[3].replace('GAMMA', 'Γ')}|{next_parts[3].replace('GAMMA', 'Γ')}"
+                            k_path.append([float(x) for x in next_parts[:3]])
+                            raw_labels.append(rf"${combined}$")
+                            i += 2  # Skip redundant reading of the next line
+                            continue
+                i += 1
+                continue
+            
+            parts = line.split()
+            if len(parts) >= 4:
+                coords = [float(x) for x in parts[:3]]
+                lb = parts[3].replace('GAMMA', 'Γ')
+                k_path.append(coords)
+                raw_labels.append(rf"${lb}$")
+            i += 1
+            
+    return k_path, raw_labels, nk_per_segment
+
+def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path):
+    """
+    Plot band structure using a professional publication-quality template.
+    
+    Parameters:
+    k_dist (np.ndarray): Array of cumulative k-path distances.
+    eigen (np.ndarray): Array of eigenvalues/energies (shape: [nbands, nk]).
+    k_node (list): X-coordinates of high-symmetry points.
+    label (list): Labels for high-symmetry points (handles Γ and H|A formatting).
+    node_index (list): Indices of high-symmetry points in the k_dist array.
+    save_path (str): File path for saving the figure (without extension).
+    """
+    import matplotlib as mpl
+    # Ensure fonts are editable in Adobe Illustrator or other PDF editors
+    mpl.rcParams['pdf.fonttype'] = 42
+
+    # Initialize the figure object
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=600)
+    
+    # Configure spine (border) thickness
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5)
+    
+    # Configure major/minor tick styles
+    ax.tick_params(which='major', length=8, width=1.5, direction='out')
+    ax.tick_params(which='minor', length=4, width=1.5, direction='out')
+    ax.tick_params(which='both', axis='both', right=False, top=False, bottom=True)
+
+    # Reference Fermi level line (E-Ef = 0)
+    ax.axhline(y=0.0, linestyle='--', color='black', alpha=0.5, linewidth=1.5)
+
+    # Plot bands segment-by-segment to prevent artificial connecting lines 
+    # at path discontinuities (e.g., jumps between points like H|A)
+    for i in range(len(node_index) - 1):
+        s0 = node_index[i]
+        s1 = node_index[i+1]
+        
+        # Plot each band within the current segment
+        for n in range(len(eigen)):
+            ax.plot(k_dist[s0:s1+1], eigen[n, s0:s1+1], 
+                    linewidth=2.0, color='#589fef', linestyle='solid')
+
+    # Set horizontal axis ticks and labels
+    ax.set_xticks(k_node)
+    ax.set_xticklabels(label)
+    
+    # Configure axis titles and label sizes
+    ax.set_ylabel(r'${E}$-$E_{f}$ (eV)', fontsize=30)
+    ax.set_xlabel('Wavevector', fontsize=30)
+    ax.tick_params(axis='x', labelsize=25)
+    ax.tick_params(axis='y', labelsize=25)
+    
+    # Define energy axis range and ticks (from -3 to 3 eV)
+    energy_ticks = np.arange(-3, 3.1, 1)
+    ax.set_yticks(energy_ticks)
+    ax.set_yticklabels([f"{int(t)}" if t % 1 == 0 else f"{t}" for t in energy_ticks], fontsize=25)
+
+    # Draw vertical grid lines at high-symmetry points
+    ax.grid(True, which='major', axis='x', linestyle='solid', color='gray', alpha=0.5)
+    
+    # Set plot boundaries
+    ax.set_xlim(k_node[0], k_node[-1])
+    ax.set_ylim([-3, 3])
+
+    plt.tight_layout()
+    
+    # Export figures in both vector (PDF) and raster (PNG) formats
+    plt.savefig(f"{save_path}.pdf", transparent=True)
+    plt.savefig(f"{save_path}.png", transparent=False)
+    
+    # Close the figure to release memory
+    plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description='band calculation')
@@ -54,9 +181,14 @@ def main():
         spin_colinear = False
     
     auto_mode = input['auto_mode']
+
+    manual_k_info = None
     if not auto_mode:
-        k_path=input['k_path'] 
-        label=input['label'] 
+        kpath_file = input.get('kpath_file', 'KPATH.in')
+        k_path_coords, k_labels, nk_from_file = parse_kpath_file(kpath_file)
+        nk = nk_from_file # replace nk from yaml
+        manual_k_info = (k_path_coords, k_labels)
+        
     ################################ Input parameters end ######################
     
     if not os.path.exists(save_dir):
@@ -145,8 +277,10 @@ def main():
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
                 klabels = res
                 k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]   
-    
+                label = [rf'${lb}$' for lb in klabels]
+            else:
+                k_path, label = manual_k_info
+
             Hsoc_real, Hsoc_imag = np.split(Hsoc, 2, axis=0)
             Hsoc = [Hsoc_real[:, :nao_max, :nao_max]+1.0j*Hsoc_imag[:, :nao_max, :nao_max], 
                     Hsoc_real[:, :nao_max, nao_max:]+1.0j*Hsoc_imag[:, :nao_max, nao_max:], 
@@ -233,32 +367,9 @@ def main():
             print(f"band gap = {min_con - max_val} eV")
             
             if nk > 1:
-                # plotting of band structure
-                print('Plotting bandstructure...')
-            
-                # First make a figure object
-                fig, ax = plt.subplots()
-            
-                # specify horizontal axis details
-                ax.set_xlim(k_node[0],k_node[-1])
-                ax.set_xticks(k_node)
-                ax.set_xticklabels(label)
-                for n in range(len(k_node)):
-                    ax.axvline(x=k_node[n], linewidth=0.5, color='k')
-            
-                # plot bands
-                for n in range(norbs):
-                    ax.plot(k_dist, eigen[n])
-                ax.plot(k_dist, nk*[0.0], linestyle='--')
-            
-                # put title
-                ax.set_title("Band structure")
-                ax.set_xlabel("Path in k-space")
-                ax.set_ylabel("Band energy (eV)")
-                ax.set_ylim(-3, 3)
-                # make an PDF figure of a plot
-                fig.tight_layout()
-                plt.savefig(os.path.join(save_dir, f'band_{idx+1}.png'))#保存图片
+                print('Plotting bandstructure with professional template...')
+                save_path = os.path.join(save_dir, f'band_{idx+1}')
+                plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
                 print('Done.\n')
             
             # Export energy band data
@@ -334,7 +445,9 @@ def main():
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
                 klabels = res
                 k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]            
+                label = [rf'${lb}$' for lb in klabels]        
+            else:
+                k_path, label = manual_k_info
                 
             orb_mask = basis_definition[species].reshape(-1) # shape: [natoms*nao_max] 
             orb_mask = orb_mask[:,None] * orb_mask[None,:]       # shape: [natoms*nao_max, natoms*nao_max]
@@ -404,32 +517,9 @@ def main():
                 print(f"band gap = {min_con - max_val} eV")
 
                 if nk > 1:
-                    # plotting of band structure
-                    print('Plotting bandstructure...')
-
-                    # First make a figure object
-                    fig, ax = plt.subplots()
-
-                    # specify horizontal axis details
-                    ax.set_xlim(k_node[0],k_node[-1])
-                    ax.set_xticks(k_node)
-                    ax.set_xticklabels(label)
-                    for n in range(len(k_node)):
-                        ax.axvline(x=k_node[n], linewidth=0.5, color='k')
-
-                    # plot bands
-                    for n in range(norbs):
-                        ax.plot(k_dist, eigen[n])
-                    ax.plot(k_dist, nk*[0.0], linestyle='--')
-
-                    # put title
-                    ax.set_title("Band structure")
-                    ax.set_xlabel("Path in k-space")
-                    ax.set_ylabel("Band energy (eV)")
-                    ax.set_ylim(-3, 3)
-                    # make an PDF figure of a plot
-                    fig.tight_layout()
-                    plt.savefig(os.path.join(save_dir, f'band_spin{ispin}_{idx+1}.png'))#保存图片
+                    print(f'Plotting bandstructure for spin {ispin}...')
+                    save_path = os.path.join(save_dir, f'band_spin{ispin}_{idx+1}')
+                    plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
                     print('Done.\n')
 
                 # Export energy band data
@@ -505,7 +595,9 @@ def main():
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
                 klabels = res
                 k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]            
+                label = [rf'${lb}$' for lb in klabels]     
+            else:
+                k_path, label = manual_k_info
         
             orb_mask = basis_definition[species].reshape(-1) # shape: [natoms*nao_max] 
             orb_mask = orb_mask[:,None] * orb_mask[None,:]       # shape: [natoms*nao_max, natoms*nao_max]
@@ -572,38 +664,15 @@ def main():
             print(f"band gap = {min_con - max_val} eV")
             
             if nk > 1:
-                # plotting of band structure
-                print('Plotting bandstructure...')
-            
-                # First make a figure object
-                fig, ax = plt.subplots()
-            
-                # specify horizontal axis details
-                ax.set_xlim(k_node[0],k_node[-1])
-                ax.set_xticks(k_node)
-                ax.set_xticklabels(label)
-                for n in range(len(k_node)):
-                    ax.axvline(x=k_node[n], linewidth=0.5, color='k')
-            
-                # plot bands
-                for n in range(norbs):
-                    ax.plot(k_dist, eigen[n])
-                ax.plot(k_dist, nk*[0.0], linestyle='--')
-            
-                # put title
-                ax.set_title("Band structure")
-                ax.set_xlabel("Path in k-space")
-                ax.set_ylabel("Band energy (eV)")
-                ax.set_ylim(-3, 3)
-                # make an PDF figure of a plot
-                fig.tight_layout()
-                plt.savefig(os.path.join(save_dir, f'band_{idx+1}.png'))#保存图片
-                print('Done.\n')
+                    print('Plotting bandstructure with professional template...')
+                    save_path = os.path.join(save_dir, f'band_{idx+1}')
+                    plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
+                    print('Done.\n')
             
             # Export energy band data
             text_file = open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w")
         
-            text_file.write("# k_lable: ")
+            text_file.write("# k_label: ")
             for ik in range(len(label)):
                 text_file.write("%s " % label[ik])
             text_file.write("\n")
