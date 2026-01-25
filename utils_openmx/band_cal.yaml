@@ -5,7 +5,7 @@ hamiltonian_path: '/data/home/yzhong/ZHR/version_1/prediction_hamiltonian.npy'
 nk: 120          # the number of k points
 save_dir: '/data/home/yzhong/ZHR/version_1/prediction' # The directory to save the results
 strcture_name: 'Nb3I8'  # The name of each cif file saved is strcture_name_idx.cif after band calculation
-soc_switch: False
+soc_switch: True
 spin_colinear: False
 auto_mode: False # If the auto_mode is used, users can omit providing k_path and label, as the program will automatically generate them based on the crystal symmetry.
 kpath_file: "KPATH.in" # The k-path file, only used when auto_mode is False. Gerated by Atomkit.

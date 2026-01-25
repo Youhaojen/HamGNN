@@ -19,47 +19,55 @@ from utils_openmx.utils import *
 import argparse
 import yaml
 import torch
+import time
 
 def parse_kpath_file(filepath):
     """
-    Parse KPATH.in to extract k-point density, path coordinates, and labels, 
-    while handling path discontinuities in 'H|A' format.
+    Revised parsing function:
+    1. Filters out points with identical consecutive coordinates to prevent redundant labels.
+    2. Handles discontinuous paths represented by empty lines (e.g., jumps like H|A).
     """
     k_path = []
     raw_labels = []
-    nk_per_segment = 20  # Default value
+    nk_per_segment = 20
     
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Cannot find kpath file: {filepath}")
 
     with open(filepath, 'r') as f:
-        lines = f.readlines()
-        # 1. Read k-point density from the second line
-        try:
-            nk_per_segment = int(lines[1].strip())
-        except (IndexError, ValueError):
-            print("Warning: Could not parse nk from second line, using default.")
+        lines = [line.strip() for line in f.readlines()]
+        
+        # Read k-point density
+        try: 
+            nk_per_segment = int(lines[1])
+        except: 
+            pass
 
-        # 2. Parse k-point data (starting from line 5)
         content_lines = lines[4:]
         i = 0
         while i < len(content_lines):
-            line = content_lines[i].strip()
+            line = content_lines[i]
             
-            # Detect empty line: represents a jump/break in the k-path
+            # Handle jump points (discontinuous paths indicated by empty lines)
             if not line:
                 if i > 0 and i + 1 < len(content_lines):
-                    prev_parts = content_lines[i-1].strip().split()
-                    next_parts = content_lines[i+1].strip().split()
-                    
+                    prev_parts = content_lines[i-1].split()
+                    next_parts = content_lines[i+1].split()
                     if len(prev_parts) >= 4 and len(next_parts) >= 4:
-                        # If coordinates are different, merge labels into 'H|A' format
-                        if not np.allclose([float(x) for x in prev_parts[:3]], 
-                                         [float(x) for x in next_parts[:3]]):
+                        prev_coords = [float(x) for x in prev_parts[:3]]
+                        next_coords = [float(x) for x in next_parts[:3]]
+                        
+                        # Discontinuity is only valid if coordinates are actually different
+                        if not np.allclose(prev_coords, next_coords):
+                            if len(k_path) > 0: 
+                                # Pop the duplicate old point to prepare for combined label
+                                k_path.pop()
+                                raw_labels.pop()
+                            
                             combined = f"{prev_parts[3].replace('GAMMA', 'Γ')}|{next_parts[3].replace('GAMMA', 'Γ')}"
-                            k_path.append([float(x) for x in next_parts[:3]])
-                            raw_labels.append(rf"${combined}$")
-                            i += 2  # Skip redundant reading of the next line
+                            k_path.append(next_coords)
+                            raw_labels.append(rf"$\mathrm{{{combined}}}$")
+                            i += 2 # Skip the next line as it has been processed
                             continue
                 i += 1
                 continue
@@ -68,8 +76,14 @@ def parse_kpath_file(filepath):
             if len(parts) >= 4:
                 coords = [float(x) for x in parts[:3]]
                 lb = parts[3].replace('GAMMA', 'Γ')
+                
+                # IMPORTANT: If coordinates are identical to the previous point, skip adding the label
+                if len(k_path) > 0 and np.allclose(coords, k_path[-1]):
+                    i += 1
+                    continue
+                
                 k_path.append(coords)
-                raw_labels.append(rf"${lb}$")
+                raw_labels.append(rf"$\mathrm{{{lb}}}$")
             i += 1
             
     return k_path, raw_labels, nk_per_segment
@@ -148,6 +162,7 @@ def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path):
     plt.close()
 
 def main():
+    start_time = time.time()
     parser = argparse.ArgumentParser(description='band calculation')
     parser.add_argument('--config', default='band_cal.yaml', type=str, metavar='N')
     args = parser.parse_args()
@@ -367,33 +382,44 @@ def main():
             print(f"band gap = {min_con - max_val} eV")
             
             if nk > 1:
-                print('Plotting bandstructure with professional template...')
+                print('Plotting band structure...')
                 save_path = os.path.join(save_dir, f'band_{idx+1}')
                 plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
                 print('Done.\n')
             
             # Export energy band data
-            text_file = open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w")
+            clean_labels = []
+            eigen_plot = eigen
+            for lb in label:
+                c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
+                clean_labels.append(c_lb)
+            
+            with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
+                text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
+            
+                formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
+                text_file.write(f"# k_node: {formatted_nodes}\n")
+            
+                total_nk_points = len(k_dist)
+                break_indices = node_index[1:] 
+
+                for nb in range(len(eigen_plot)):
+                    for ik in range(total_nk_points):
+                        text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                        
+                        if ik in break_indices[:-1]:
+                            text_file.write('\n')
+                            text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                    text_file.write('\n')
+
+            end_time = time.time()
+            elapsed_time = end_time - start_time
         
-            text_file.write("# k_lable: ")
-            for ik in range(len(label)):
-                text_file.write("%s " % label[ik])
-            text_file.write("\n")
-        
-            text_file.write("# k_node: ")
-            for ik in range(len(k_node)):
-                text_file.write("%f  " % k_node[ik])
-            text_file.write("\n")
-        
-            node_index = node_index[1:]
-            for nb in range(len(eigen)):
-                for ik in range(nk):
-                    text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))
-                    if ik in node_index[:-1]:
-                        text_file.write('\n')
-                        text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))       
-                text_file.write('\n')
-            text_file.close()
+            print("-" * 36)
+            print(f"Started at: {time.ctime(start_time)}")
+            print(f"Ended at: {time.ctime(end_time)}")
+            print(f"Total time: {elapsed_time:.2f} s")
+            print("-" * 36)
 
     elif spin_colinear:
         # Calculate the length of H for each structure
@@ -517,33 +543,44 @@ def main():
                 print(f"band gap = {min_con - max_val} eV")
 
                 if nk > 1:
-                    print(f'Plotting bandstructure for spin {ispin}...')
+                    print(f'Plotting band structure...')
                     save_path = os.path.join(save_dir, f'band_spin{ispin}_{idx+1}')
                     plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
                     print('Done.\n')
 
                 # Export energy band data
-                text_file = open(os.path.join(save_dir, f'band_spin{ispin}_{idx+1}.dat'), "w")
+                clean_labels = []
+                eigen_plot = eigen
+                for lb in label:
+                    c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
+                    clean_labels.append(c_lb)
+            
+                with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
+                    text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
+            
+                    formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
+                    text_file.write(f"# k_node: {formatted_nodes}\n")
+            
+                    total_nk_points = len(k_dist)
+                    break_indices = node_index[1:] 
 
-                text_file.write("# k_lable: ")
-                for ik in range(len(label)):
-                    text_file.write("%s " % label[ik])
-                text_file.write("\n")
+                    for nb in range(len(eigen_plot)):
+                        for ik in range(total_nk_points):
+                            text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                        
+                            if ik in break_indices[:-1]:
+                                text_file.write('\n')
+                                text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                        text_file.write('\n')
 
-                text_file.write("# k_node: ")
-                for ik in range(len(k_node)):
-                    text_file.write("%f  " % k_node[ik])
-                text_file.write("\n")
-
-                node_index = node_index[1:]
-                for nb in range(len(eigen)):
-                    for ik in range(nk):
-                        text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))
-                        if ik in node_index[:-1]:
-                            text_file.write('\n')
-                            text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))       
-                    text_file.write('\n')
-                text_file.close()
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+        
+                print("-" * 36)
+                print(f"Started at: {time.ctime(start_time)}")
+                print(f"Ended at: {time.ctime(end_time)}")
+                print(f"Total time: {elapsed_time:.2f} s")
+                print("-" * 36)
     
     else:
         # Calculate the length of H for each structure
@@ -664,33 +701,44 @@ def main():
             print(f"band gap = {min_con - max_val} eV")
             
             if nk > 1:
-                    print('Plotting bandstructure with professional template...')
+                    print('Plotting band structure ...')
                     save_path = os.path.join(save_dir, f'band_{idx+1}')
                     plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
                     print('Done.\n')
             
             # Export energy band data
-            text_file = open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w")
+            clean_labels = []
+            eigen_plot = eigen
+            for lb in label:
+                c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
+                clean_labels.append(c_lb)
+            
+            with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
+                text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
+            
+                formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
+                text_file.write(f"# k_node: {formatted_nodes}\n")
+            
+                total_nk_points = len(k_dist)
+                break_indices = node_index[1:] 
+
+                for nb in range(len(eigen_plot)):
+                    for ik in range(total_nk_points):
+                        text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                        
+                        if ik in break_indices[:-1]:
+                            text_file.write('\n')
+                            text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                    text_file.write('\n')
+
+            end_time = time.time()
+            elapsed_time = end_time - start_time
         
-            text_file.write("# k_label: ")
-            for ik in range(len(label)):
-                text_file.write("%s " % label[ik])
-            text_file.write("\n")
-        
-            text_file.write("# k_node: ")
-            for ik in range(len(k_node)):
-                text_file.write("%f  " % k_node[ik])
-            text_file.write("\n")
-        
-            node_index = node_index[1:]
-            for nb in range(len(eigen)):
-                for ik in range(nk):
-                    text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))
-                    if ik in node_index[:-1]:
-                        text_file.write('\n')
-                        text_file.write("%f    %f\n" % (k_dist[ik], eigen[nb,ik]))       
-                text_file.write('\n')
-            text_file.close()
+            print("-" * 36)
+            print(f"Started at: {time.ctime(start_time)}")
+            print(f"Ended at: {time.ctime(end_time)}")
+            print(f"Total time: {elapsed_time:.2f} s")
+            print("-" * 36)
 
 if __name__ == '__main__':
     main()
