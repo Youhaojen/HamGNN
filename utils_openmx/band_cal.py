@@ -130,7 +130,9 @@ def main():
             cell_shift = data.cell_shift.numpy()
             species = data.z.numpy()
             struct = Structure(lattice=latt*au2ang, species=[Element.from_Z(k).symbol for k in species], coords=pos, coords_are_cartesian=True)
-            struct.to(filename=os.path.join(save_dir, filename+f'_{idx+1}.cif'))
+            cif_path = os.path.join(save_dir, filename + f'_{idx+1}.cif')
+            with open(cif_path, 'w', encoding='utf-8') as f:
+                f.write(struct.to(fmt="cif"))
         
             # Initialize k_path and lable        
             if auto_mode:
@@ -317,7 +319,9 @@ def main():
             edge_index = data.edge_index.numpy()
             species = data.z.numpy()
             struct = Structure(lattice=latt*au2ang, species=[Element.from_Z(k).symbol for k in species], coords=pos, coords_are_cartesian=True)
-            struct.to(filename=os.path.join(save_dir, filename+f'_{idx+1}.cif'))
+            cif_path = os.path.join(save_dir, filename + f'_{idx+1}.cif')
+            with open(cif_path, 'w', encoding='utf-8') as f:
+                f.write(struct.to(fmt="cif"))
         
             # Initialize k_path and lable        
             if auto_mode:
@@ -486,7 +490,9 @@ def main():
             edge_index = data.edge_index.numpy()
             species = data.z.numpy()
             struct = Structure(lattice=latt*au2ang, species=[Element.from_Z(k).symbol for k in species], coords=pos, coords_are_cartesian=True)
-            struct.to(filename=os.path.join(save_dir, filename+f'_{idx+1}.cif'))
+            cif_path = os.path.join(save_dir, filename + f'_{idx+1}.cif')
+            with open(cif_path, 'w', encoding='utf-8') as f:
+                f.write(struct.to(fmt="cif"))
         
             # Initialize k_path and lable        
             if auto_mode:
