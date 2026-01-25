@@ -382,11 +382,11 @@ Band structure calculation is used to verify the accuracy of predicted Hamiltoni
    python band_cal.py --config band_cal.yaml
    ```
 
-   Band Calculation for Large Systems (mpi version)
+   Band Calculation for Large Systems (MPI version)
    ```bash
-   mpirun -np 16 python band_cal_mpi.py
+   mpirun -np 16 python band_cal_mpi.py --config band_cal.yaml
    ```
-   * mpi version is over 2 times faster than that without mpi.
+   * The MPI implementation achieves a speedup of over 2x compared to the serial version.
 
 ## 8. Introduction to and Usage of Uni-HamGNN Universal Model
 ### Model Introduction
