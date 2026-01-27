@@ -3,8 +3,8 @@ Descripttion: The scripts used to generate the input file graph_data.npz for Ham
 version: 0.1
 Author: Yang Zhong
 Date: 2022-11-24 19:07:54
-LastEditors: Yang Zhong
-LastEditTime: 2023-12-18 16:13:22
+LastEditors: Hao-Jen You
+LastEditTime: 2026-01-27 21:00:00
 '''
 
 import json
@@ -89,20 +89,48 @@ def main():
         
         # Read crystal parameters
         try:
-            with open(f_dat,'r') as f:
+            with open(f_dat, 'r') as f:
                 content = f.read()
-                speciesAndCoordinates = pattern_coor.findall((content).strip())
-                latt = pattern_latt.findall((content).strip())[0]
-                latt = np.array([float(var) for var in latt]).reshape(-1, 3)/au2ang
+                
+                # 1. Improved lattice vector extraction logic
+                # Use regex to extract numeric values between <Atoms.UnitVectors ... Atoms.UnitVectors>
+                latt_block = re.search(r'<Atoms.UnitVectors(?P<vec>.*?)Atoms.UnitVectors>', content, re.S)
+                if not latt_block:
+                    print(f"Skipping: Lattice block not found in {f_dat}")
+                    continue
+                
+                # Convert the extracted block into a list of floats
+                latt_raw = [float(x) for x in latt_block.group('vec').split()]
+                if len(latt_raw) != 9:
+                    print(f"Error: Lattice vectors should have 9 numbers, found {len(latt_raw)}")
+                    continue
+                latt = np.array(latt_raw).reshape(3, 3) / au2ang
         
+                # 2. Improved atomic coordinates extraction logic (Handles the 7-column format)
+                coor_block = re.search(r'<Atoms.SpeciesAndCoordinates(?P<coor>.*?)Atoms.SpeciesAndCoordinates>', content, re.S)
+                if not coor_block:
+                    print(f"Skipping: Coordinates block not found in {f_dat}")
+                    continue
+                
+                lines = coor_block.group('coor').strip().split('\n')
                 species = []
-                coordinates = []
-                for item in speciesAndCoordinates:
-                    species.append(item[0])
-                    coordinates += item[1:]
-                z = atomic_numbers = np.array([Element[s].Z for s in species])
-                coordinates = np.array([float(pos) for pos in coordinates]).reshape(-1, 3)/au2ang
-        except:
+                coords_list = []
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) < 5: continue # Skip invalid or empty lines
+                    
+                    # parts[0] is the index (1, 2...), parts[1] is the element symbol (e.g., Ga, As)
+                    species.append(parts[1])
+                    # parts[2:5] are the X, Y, Z coordinates
+                    coords_list.append([float(x) for x in parts[2:5]])
+                
+                z = np.array([Element[s].Z for s in species])
+                coordinates = np.array(coords_list) / au2ang
+                
+                print(f"Successfully parsed {len(species)} atoms and lattice from {f_dat}")
+
+        except Exception as e:
+            print(f"Error processing {f_dat}: {e}")
             continue
         
         if soc_switch:
