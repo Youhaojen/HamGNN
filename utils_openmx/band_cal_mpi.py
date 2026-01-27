@@ -1,3 +1,12 @@
+'''
+Descripttion: The script to calculat bands from the results of HamGNN
+version: 1.0
+Author: Yang Zhong
+Date: 2022-12-20 14:08:52
+LastEditors: Hao-Jen You
+LastEditTime: 2026-01-27 12:00:00
+'''
+
 import numpy as np
 import matplotlib.pyplot as plt
 from pymatgen.core.structure import Structure
@@ -13,6 +22,24 @@ import time
 from mpi4py import MPI
 
 torch.set_num_threads(1)
+
+def get_fermi_weight(energy_diff, kt=0.01):
+    """
+    Calculate the Fermi-Dirac distribution.
+    
+    Parameters:
+    energy_diff : float or ndarray
+        The energy difference (E - Ef) in eV.
+    kt : float
+        The thermal smearing width (k_B * T) in eV.
+    
+    Returns:
+    float or ndarray
+        The occupancy weights (0.0 to 1.0).
+    """
+    arg = energy_diff / kt
+    # Clip arg range to prevent numerical overflow in np.exp
+    return 1.0 / (np.exp(np.clip(arg, -60, 60)) + 1.0)
 
 def parse_kpath_file(filepath):
     """
@@ -81,7 +108,7 @@ def parse_kpath_file(filepath):
             
     return k_path, raw_labels, nk_per_segment
 
-def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path):
+def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path, n_occ):
     """Plot band structure using professional publication-quality template."""
     import matplotlib as mpl
     mpl.rcParams['pdf.fonttype'] = 42
@@ -95,12 +122,24 @@ def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path):
     ax.tick_params(which='both', axis='both', right=False, top=False, bottom=True)
     ax.axhline(y=0.0, linestyle='--', color='black', alpha=0.5, linewidth=1.5)
 
-    for i in range(len(node_index) - 1):
-        s0 = node_index[i]
-        s1 = node_index[i+1]
-        for n in range(len(eigen)):
+    color_vb = '#589fef' # blue
+    color_cb = '#56c278' # green
+
+    for n in range(len(eigen)):
+        if n < n_occ:
+            band_color = color_vb
+            label_name = 'Valence'
+        else:
+            band_color = color_cb
+            label_name = 'Conduction'
+        
+        for i in range(len(node_index) - 1):
+            s0 = node_index[i]
+            s1 = node_index[i+1]
+            line_label = label_name if (n == 0 or n == n_occ) and i == 0 else None
+            
             ax.plot(k_dist[s0:s1+1], eigen[n, s0:s1+1], 
-                    linewidth=2.0, color='#589fef', linestyle='solid')
+                    linewidth=2.0, color=band_color, label=line_label)
 
     ax.set_xticks(k_node)
     ax.set_xticklabels(label)
@@ -277,56 +316,92 @@ def main():
         gathered_eigen = comm.gather(eigen_local, root=0)
 
         if rank == 0:
+            # Flatten and transpose eigenvalues from all ranks, then convert from Atomic Units (Hartree) to eV
             all_eigen_raw = np.array([e for r in gathered_eigen for e in r]).T * au2ev
-            
             num_electrons = np.sum(num_val[species])
-            occ_idx = (int(num_electrons) - 1) if soc_switch else (math.ceil(num_electrons/2) - 1)
             
-            vbm = np.max(all_eigen_raw[occ_idx])
-            eigen_plot = all_eigen_raw - vbm
-
-            gap = np.min(eigen_plot[occ_idx+1]) - np.max(eigen_plot[occ_idx])
+            # --- 1. Fermi Level Calculation ---
+            # Determine target electron count; if SOC is off, divide by 2 for spin degeneracy
+            target_nelec = num_electrons if soc_switch else num_electrons / 2.0
+            elw, eup = np.min(all_eigen_raw) - 1.0, np.max(all_eigen_raw) + 1.0
             
-            print(f"max_val = {vbm} eV")
-            print(f"band gap = {gap} eV")
-
-            # 繪圖
-            print('Plotting band structure ...')
-            plot_band_structure(k_dist, eigen_plot, k_node, current_label, node_index, os.path.join(save_dir, f'band_{idx+1}'))
-            print('Done.\n')
-
-            # Export energy band data
-            clean_labels = []
-            for lb in current_label:
-                c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
-                clean_labels.append(c_lb)
+            # Solve for Fermi Level using Bisection Method
+            for i in range(100): 
+                ef_test = (elw + eup) / 2.0
+                sigma = 0.01  # Smearing width in eV
+                occupancy = get_fermi_weight(all_eigen_raw - ef_test, kt=sigma)
+                total_n = np.sum(occupancy) / len(k_dist)
+                
+                if total_n < target_nelec:
+                    elw = ef_test
+                else:
+                    eup = ef_test
             
+            e_fermi = (elw + eup) / 2.0
+
+            # Shift all eigenvalues relative to the calculated Fermi Level
+            eigen_plot = all_eigen_raw - e_fermi
+
+            # --- 2. Identify Occupied Band Indices ---
+            n_occ = int(round(target_nelec))
+            # vb_band (Valence Band) is the n_occ-th band (index n_occ-1)
+            # cb_band (Conduction Band) is the (n_occ+1)-th band (index n_occ)
+            vb_band = eigen_plot[n_occ - 1, :]
+            cb_band = eigen_plot[n_occ, :]
+
+            vbm = np.max(vb_band)
+            cbm = np.min(cb_band)
+            gap = cbm - vbm
+
+            # Find the indices for VBM/CBM along the K-path
+            vbm_k_idx = np.argmax(vb_band)
+            cbm_k_idx = np.argmin(cb_band)
+
+            # --- 3. Auto-detect System Type and Printing ---
+            print("-" * 53)
+            print(f"Calculated Fermi Level: {e_fermi:.6f} eV")
+            vbm_k_coords = k_vec_all[vbm_k_idx]
+            cbm_k_coords = k_vec_all[cbm_k_idx]
+            gap_type = "Direct" if vbm_k_idx == cbm_k_idx else "Indirect"
+            print(f"        Band Character:    {gap_type}")
+            print(f"         Band Gap (eV):    {gap:.4f}")
+            print(f"Eigenvalue of VBM (eV):    {vbm+e_fermi:.4f}")
+            print(f"Eigenvalue of CBM (eV):    {cbm+e_fermi:.4f}")
+            print(f"     HOMO & LUMO Bands:        {n_occ}        {n_occ + 1}")
+            print(f"       Location of VBM:  {vbm_k_coords[0]:.6f}  {vbm_k_coords[1]:.6f}  {vbm_k_coords[2]:.6f}")
+            print(f"       Location of CBM:  {cbm_k_coords[0]:.6f}  {cbm_k_coords[1]:.6f}  {cbm_k_coords[2]:.6f}")
+            print("-" * 53)
+            #print('Plotting band structure ...')
+            # Pass n_occ to the plotting function for band color differentiation
+            plot_band_structure(k_dist, eigen_plot, k_node, current_label, node_index, 
+                                os.path.join(save_dir, f'band_{idx+1}'), n_occ)
+            
+            # --- 4. Exporting Data to .dat File ---
+            # Remove LaTeX formatting from labels for raw text export
+            clean_labels = [lb.replace(r'$\mathrm{', '').replace('}$', '').strip() for lb in current_label]
             with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
                 text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
-            
-                formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
-                text_file.write(f"# k_node: {formatted_nodes}\n")
-            
-                total_nk_points = len(k_dist)
-                break_indices = node_index[1:] 
-
+                text_file.write(f"# k_node: {' '.join([f'{kn:.6f}' for kn in k_node])}\n")
+                
+                break_indices = node_index[1:]
                 for nb in range(len(eigen_plot)):
-                    for ik in range(total_nk_points):
+                    for ik in range(len(k_dist)):
                         text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
                         
+                        # Handle discontinuities in the K-path (high-symmetry points)
                         if ik in break_indices[:-1]:
                             text_file.write('\n')
                             text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                    # Add extra newline between bands for Gnuplot/standard compatibility
                     text_file.write('\n')
 
             end_time = time.time()
             elapsed_time = end_time - start_time
         
-            print("-" * 36)
             print(f"Started at: {time.ctime(start_time)}")
             print(f"Ended at: {time.ctime(end_time)}")
             print(f"Total time: {elapsed_time:.2f} s")
-            print("-" * 36)
+            print("-" * 53)
 
 if __name__ == '__main__':
     main()

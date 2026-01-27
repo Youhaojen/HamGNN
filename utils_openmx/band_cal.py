@@ -4,7 +4,7 @@ version: 1.0
 Author: Yang Zhong
 Date: 2022-12-20 14:08:52
 LastEditors: Hao-Jen You
-LastEditTime: 2026-01-25 20:30:00
+LastEditTime: 2026-01-27 12:00:00
 '''
 
 import numpy as np
@@ -20,6 +20,24 @@ import argparse
 import yaml
 import torch
 import time
+
+def get_fermi_weight(energy_diff, kt=0.01):
+    """
+    Calculate the Fermi-Dirac distribution.
+    
+    Parameters:
+    energy_diff : float or ndarray
+        The energy difference (E - Ef) in eV.
+    kt : float
+        The thermal smearing width (k_B * T) in eV.
+    
+    Returns:
+    float or ndarray
+        The occupancy weights (0.0 to 1.0).
+    """
+    arg = energy_diff / kt
+    # Clip arg range to prevent numerical overflow in np.exp
+    return 1.0 / (np.exp(np.clip(arg, -60, 60)) + 1.0)
 
 def parse_kpath_file(filepath):
     """
@@ -88,77 +106,55 @@ def parse_kpath_file(filepath):
             
     return k_path, raw_labels, nk_per_segment
 
-def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path):
-    """
-    Plot band structure using a professional publication-quality template.
-    
-    Parameters:
-    k_dist (np.ndarray): Array of cumulative k-path distances.
-    eigen (np.ndarray): Array of eigenvalues/energies (shape: [nbands, nk]).
-    k_node (list): X-coordinates of high-symmetry points.
-    label (list): Labels for high-symmetry points (handles Γ and H|A formatting).
-    node_index (list): Indices of high-symmetry points in the k_dist array.
-    save_path (str): File path for saving the figure (without extension).
-    """
+def plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path, n_occ):
+    """Plot band structure using professional publication-quality template."""
     import matplotlib as mpl
-    # Ensure fonts are editable in Adobe Illustrator or other PDF editors
     mpl.rcParams['pdf.fonttype'] = 42
 
-    # Initialize the figure object
     fig, ax = plt.subplots(figsize=(8, 8), dpi=600)
-    
-    # Configure spine (border) thickness
     for spine in ax.spines.values():
         spine.set_linewidth(1.5)
     
-    # Configure major/minor tick styles
     ax.tick_params(which='major', length=8, width=1.5, direction='out')
     ax.tick_params(which='minor', length=4, width=1.5, direction='out')
     ax.tick_params(which='both', axis='both', right=False, top=False, bottom=True)
-
-    # Reference Fermi level line (E-Ef = 0)
     ax.axhline(y=0.0, linestyle='--', color='black', alpha=0.5, linewidth=1.5)
 
-    # Plot bands segment-by-segment to prevent artificial connecting lines 
-    # at path discontinuities (e.g., jumps between points like H|A)
-    for i in range(len(node_index) - 1):
-        s0 = node_index[i]
-        s1 = node_index[i+1]
-        
-        # Plot each band within the current segment
-        for n in range(len(eigen)):
-            ax.plot(k_dist[s0:s1+1], eigen[n, s0:s1+1], 
-                    linewidth=2.0, color='#589fef', linestyle='solid')
+    color_vb = '#589fef' # blue
+    color_cb = '#56c278' # green
 
-    # Set horizontal axis ticks and labels
+    for n in range(len(eigen)):
+        if n < n_occ:
+            band_color = color_vb
+            label_name = 'Valence'
+        else:
+            band_color = color_cb
+            label_name = 'Conduction'
+        
+        for i in range(len(node_index) - 1):
+            s0 = node_index[i]
+            s1 = node_index[i+1]
+            line_label = label_name if (n == 0 or n == n_occ) and i == 0 else None
+            
+            ax.plot(k_dist[s0:s1+1], eigen[n, s0:s1+1], 
+                    linewidth=2.0, color=band_color, label=line_label)
+
     ax.set_xticks(k_node)
     ax.set_xticklabels(label)
-    
-    # Configure axis titles and label sizes
     ax.set_ylabel(r'${E}$-$E_{f}$ (eV)', fontsize=30)
     ax.set_xlabel('Wavevector', fontsize=30)
     ax.tick_params(axis='x', labelsize=25)
     ax.tick_params(axis='y', labelsize=25)
     
-    # Define energy axis range and ticks (from -3 to 3 eV)
     energy_ticks = np.arange(-3, 3.1, 1)
     ax.set_yticks(energy_ticks)
     ax.set_yticklabels([f"{int(t)}" if t % 1 == 0 else f"{t}" for t in energy_ticks], fontsize=25)
-
-    # Draw vertical grid lines at high-symmetry points
     ax.grid(True, which='major', axis='x', linestyle='solid', color='gray', alpha=0.5)
-    
-    # Set plot boundaries
     ax.set_xlim(k_node[0], k_node[-1])
     ax.set_ylim([-3, 3])
-
     plt.tight_layout()
-    
-    # Export figures in both vector (PDF) and raster (PNG) formats
     plt.savefig(f"{save_path}.pdf", transparent=True)
     plt.savefig(f"{save_path}.png", transparent=False)
-    
-    # Close the figure to release memory
     plt.close()
 
 def main():
@@ -283,18 +279,15 @@ def main():
         
             # Initialize k_path and lable        
             if auto_mode:
-                kpath_seek = KPathSeek(structure = struct)
+                kpath_seek = KPathSeek(structure=struct)
                 klabels = []
-                for lbs in kpath_seek.kpath['path']:
-                    klabels += lbs
-                # remove adjacent duplicates   
+                for lbs in kpath_seek.kpath['path']: klabels += lbs
                 res = [klabels[0]]
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
-                klabels = res
-                k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]
+                current_k_path = [kpath_seek.kpath['kpoints'][k] for k in res]
+                current_label = [rf'$\mathrm{{{lb.replace("GAMMA","Γ")}}}$' for lb in res]
             else:
-                k_path, label = manual_k_info
+                current_k_path, current_label = k_path_coords, k_labels
 
             Hsoc_real, Hsoc_imag = np.split(Hsoc, 2, axis=0)
             Hsoc = [Hsoc_real[:, :nao_max, :nao_max]+1.0j*Hsoc_imag[:, :nao_max, :nao_max], 
@@ -302,10 +295,10 @@ def main():
                     Hsoc_real[:, nao_max:, :nao_max]+1.0j*Hsoc_imag[:, nao_max:, :nao_max],
                     Hsoc_real[:, nao_max:, nao_max:]+1.0j*Hsoc_imag[:, nao_max:, nao_max:]]
     
-            kpts=kpoints_generator(dim_k=3, lat=latt)
-            k_vec, k_dist, k_node, lat_per_inv, node_index = kpts.k_path(k_path, nk)
-            k_vec = k_vec.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
-            k_vec = k_vec.reshape(-1,3) # shape (nk, 3)
+            kpts_gen = kpoints_generator(dim_k=3, lat=latt)
+            k_vec_all, k_dist, k_node, lat_per_inv, node_index = kpts_gen.k_path(current_k_path, nk)
+            k_vec_all = k_vec_all.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
+            k_vec_all = k_vec_all.reshape(-1,3) # shape (nk, 3)
             
             orb_mask = basis_definition[species].reshape(-1) # shape: [natoms*nao_max] 
             orb_mask = orb_mask[:,None] * orb_mask[None,:]       # shape: [natoms*nao_max, natoms*nao_max]
@@ -322,7 +315,7 @@ def main():
             eigen = []
             for ik in range(nk):
                 phase = np.zeros((ncells,),dtype=np.complex64) # shape (ncells,)
-                phase[cell_index] = np.exp(2j*np.pi*np.sum(nbr_shift[:,:]*k_vec[ik,None,:], axis=-1))    
+                phase[cell_index] = np.exp(2j*np.pi*np.sum(nbr_shift[:,:]*k_vec_all[ik,None,:], axis=-1))    
                 na = np.arange(natoms)
         
                 S_cell = np.zeros((ncells, natoms, natoms, nao_max, nao_max), dtype=np.complex64)
@@ -371,55 +364,93 @@ def main():
                 orbital_energies = orbital_energies.squeeze(0)
                 eigen.append(orbital_energies.cpu().numpy())
             
-            eigen = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
+            all_eigen_raw = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
     
             # plot fermi line    
             num_electrons = np.sum(num_val[species])
-            max_val = np.max(eigen[num_electrons-1])
-            min_con = np.min(eigen[num_electrons])
-            eigen = eigen - max_val
-            print(f"max_val = {max_val} eV")
-            print(f"band gap = {min_con - max_val} eV")
             
-            if nk > 1:
-                print('Plotting band structure...')
-                save_path = os.path.join(save_dir, f'band_{idx+1}')
-                plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
-                print('Done.\n')
+            # --- 1. Fermi Level Calculation ---
+            # Determine target electron count; if SOC is off, divide by 2 for spin degeneracy
+            target_nelec = num_electrons if soc_switch else num_electrons / 2.0
+            elw, eup = np.min(all_eigen_raw) - 1.0, np.max(all_eigen_raw) + 1.0
             
-            # Export energy band data
-            clean_labels = []
-            eigen_plot = eigen
-            for lb in label:
-                c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
-                clean_labels.append(c_lb)
+            # Solve for Fermi Level using Bisection Method
+            for i in range(100): 
+                ef_test = (elw + eup) / 2.0
+                sigma = 0.01  # Smearing width in eV
+                occupancy = get_fermi_weight(all_eigen_raw - ef_test, kt=sigma)
+                total_n = np.sum(occupancy) / len(k_dist)
+                
+                if total_n < target_nelec:
+                    elw = ef_test
+                else:
+                    eup = ef_test
             
+            e_fermi = (elw + eup) / 2.0
+
+            # Shift all eigenvalues relative to the calculated Fermi Level
+            eigen_plot = all_eigen_raw - e_fermi
+
+            # --- 2. Identify Occupied Band Indices ---
+            n_occ = int(round(target_nelec))
+            # vb_band (Valence Band) is the n_occ-th band (index n_occ-1)
+            # cb_band (Conduction Band) is the (n_occ+1)-th band (index n_occ)
+            vb_band = eigen_plot[n_occ - 1, :]
+            cb_band = eigen_plot[n_occ, :]
+
+            vbm = np.max(vb_band)
+            cbm = np.min(cb_band)
+            gap = cbm - vbm
+
+            # Find the indices for VBM/CBM along the K-path
+            vbm_k_idx = np.argmax(vb_band)
+            cbm_k_idx = np.argmin(cb_band)
+
+            # --- 3. Auto-detect System Type and Printing ---
+            print("-" * 53)
+            print(f"Calculated Fermi Level: {e_fermi:.6f} eV")
+            vbm_k_coords = k_vec_all[vbm_k_idx]
+            cbm_k_coords = k_vec_all[cbm_k_idx]
+            gap_type = "Direct" if vbm_k_idx == cbm_k_idx else "Indirect"
+            print(f"        Band Character:    {gap_type}")
+            print(f"         Band Gap (eV):    {gap:.4f}")
+            print(f"Eigenvalue of VBM (eV):    {vbm+e_fermi:.4f}")
+            print(f"Eigenvalue of CBM (eV):    {cbm+e_fermi:.4f}")
+            print(f"     HOMO & LUMO Bands:        {n_occ}        {n_occ + 1}")
+            print(f"       Location of VBM:  {vbm_k_coords[0]:.6f}  {vbm_k_coords[1]:.6f}  {vbm_k_coords[2]:.6f}")
+            print(f"       Location of CBM:  {cbm_k_coords[0]:.6f}  {cbm_k_coords[1]:.6f}  {cbm_k_coords[2]:.6f}")
+            print("-" * 53)
+            #print('Plotting band structure ...')
+            # Pass n_occ to the plotting function for band color differentiation
+            plot_band_structure(k_dist, eigen_plot, k_node, current_label, node_index, 
+                                os.path.join(save_dir, f'band_{idx+1}'), n_occ)
+            
+            # --- 4. Exporting Data to .dat File ---
+            # Remove LaTeX formatting from labels for raw text export
+            clean_labels = [lb.replace(r'$\mathrm{', '').replace('}$', '').strip() for lb in current_label]
             with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
                 text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
-            
-                formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
-                text_file.write(f"# k_node: {formatted_nodes}\n")
-            
-                total_nk_points = len(k_dist)
-                break_indices = node_index[1:] 
-
+                text_file.write(f"# k_node: {' '.join([f'{kn:.6f}' for kn in k_node])}\n")
+                
+                break_indices = node_index[1:]
                 for nb in range(len(eigen_plot)):
-                    for ik in range(total_nk_points):
+                    for ik in range(len(k_dist)):
                         text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
                         
+                        # Handle discontinuities in the K-path (high-symmetry points)
                         if ik in break_indices[:-1]:
                             text_file.write('\n')
                             text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                    # Add extra newline between bands for Gnuplot/standard compatibility
                     text_file.write('\n')
 
             end_time = time.time()
             elapsed_time = end_time - start_time
         
-            print("-" * 36)
             print(f"Started at: {time.ctime(start_time)}")
             print(f"Ended at: {time.ctime(end_time)}")
             print(f"Total time: {elapsed_time:.2f} s")
-            print("-" * 36)
+            print("-" * 53)
 
     elif spin_colinear:
         # Calculate the length of H for each structure
@@ -462,33 +493,30 @@ def main():
         
             # Initialize k_path and lable        
             if auto_mode:
-                kpath_seek = KPathSeek(structure = struct)
+                kpath_seek = KPathSeek(structure=struct)
                 klabels = []
-                for lbs in kpath_seek.kpath['path']:
-                    klabels += lbs
-                # remove adjacent duplicates   
+                for lbs in kpath_seek.kpath['path']: klabels += lbs
                 res = [klabels[0]]
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
-                klabels = res
-                k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]        
+                current_k_path = [kpath_seek.kpath['kpoints'][k] for k in res]
+                current_label = [rf'$\mathrm{{{lb.replace("GAMMA","Γ")}}}$' for lb in res]
             else:
-                k_path, label = manual_k_info
+                current_k_path, current_label = k_path_coords, k_labels
                 
             orb_mask = basis_definition[species].reshape(-1) # shape: [natoms*nao_max] 
             orb_mask = orb_mask[:,None] * orb_mask[None,:]       # shape: [natoms*nao_max, natoms*nao_max]
         
-            kpts=kpoints_generator(dim_k=3, lat=latt)
-            k_vec, k_dist, k_node, lat_per_inv, node_index = kpts.k_path(k_path, nk)
+            kpts_gen = kpoints_generator(dim_k=3, lat=latt)
+            k_vec_all, k_dist, k_node, lat_per_inv, node_index = kpts_gen.k_path(current_k_path, nk)
         
-            k_vec = k_vec.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
-            k_vec = k_vec.reshape(-1,3) # shape (nk, 3)
+            k_vec_all = k_vec_all.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
+            k_vec_all = k_vec_all.reshape(-1,3) # shape (nk, 3)
         
             natoms = len(struct)
             
             for ispin in range(2):
                 eigen = []
-                for ik in range(len(k_vec)):            
+                for ik in range(len(k_vec_all)):            
                     HK = np.zeros((natoms, natoms, nao_max, nao_max), dtype=np.complex64)
                     SK = np.zeros((natoms, natoms, nao_max, nao_max), dtype=np.complex64)
     
@@ -496,7 +524,7 @@ def main():
                     HK[na,na,:,:] +=  Hon[na, ispin, :, :] # shape (natoms, nao_max, nao_max)
                     SK[na,na,:,:] +=  Son[na, :, :]
     
-                    coe = np.exp(2j*np.pi*np.sum(nbr_shift*k_vec[ik][None,:], axis=-1)) # shape (nedges,)
+                    coe = np.exp(2j*np.pi*np.sum(nbr_shift*k_vec_all[ik][None,:], axis=-1)) # shape (nedges,)
     
                     for iedge in range(len(Hoff)):
                         # shape (nao_max, nao_max) += (1, 1)*(nao_max, nao_max)
@@ -531,56 +559,93 @@ def main():
                     orbital_energies = orbital_energies.squeeze(0)
                     eigen.append(orbital_energies.cpu().numpy())
 
-                eigen = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
+                all_eigen_raw = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
 
                 # plot fermi line    
                 num_electrons = np.sum(num_val[species])
-                max_val = np.max(eigen[math.ceil(num_electrons/2)-1])
-                min_con = np.min(eigen[math.ceil(num_electrons/2)])
-                eigen = eigen - max_val
-                print(f'band info for spin No.{ispin}')
-                print(f"max_val = {max_val} eV")
-                print(f"band gap = {min_con - max_val} eV")
-
-                if nk > 1:
-                    print(f'Plotting band structure...')
-                    save_path = os.path.join(save_dir, f'band_spin{ispin}_{idx+1}')
-                    plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
-                    print('Done.\n')
-
-                # Export energy band data
-                clean_labels = []
-                eigen_plot = eigen
-                for lb in label:
-                    c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
-                    clean_labels.append(c_lb)
             
+                # --- 1. Fermi Level Calculation ---
+                # Determine target electron count; if SOC is off, divide by 2 for spin degeneracy
+                target_nelec = num_electrons if soc_switch else num_electrons / 2.0
+                elw, eup = np.min(all_eigen_raw) - 1.0, np.max(all_eigen_raw) + 1.0
+            
+                # Solve for Fermi Level using Bisection Method
+                for i in range(100): 
+                    ef_test = (elw + eup) / 2.0
+                    sigma = 0.01  # Smearing width in eV
+                    occupancy = get_fermi_weight(all_eigen_raw - ef_test, kt=sigma)
+                    total_n = np.sum(occupancy) / len(k_dist)
+                
+                    if total_n < target_nelec:
+                        elw = ef_test
+                    else:
+                        eup = ef_test
+            
+                e_fermi = (elw + eup) / 2.0
+
+                # Shift all eigenvalues relative to the calculated Fermi Level
+                eigen_plot = all_eigen_raw - e_fermi
+
+                # --- 2. Identify Occupied Band Indices ---
+                n_occ = int(round(target_nelec))
+                # vb_band (Valence Band) is the n_occ-th band (index n_occ-1)
+                # cb_band (Conduction Band) is the (n_occ+1)-th band (index n_occ)
+                vb_band = eigen_plot[n_occ - 1, :]
+                cb_band = eigen_plot[n_occ, :]
+
+                vbm = np.max(vb_band)
+                cbm = np.min(cb_band)
+                gap = cbm - vbm
+
+                # Find the indices for VBM/CBM along the K-path
+                vbm_k_idx = np.argmax(vb_band)
+                cbm_k_idx = np.argmin(cb_band)
+
+                # --- 3. Auto-detect System Type and Printing ---
+                print("-" * 53)
+                print(f"Calculated Fermi Level: {e_fermi:.6f} eV")
+                vbm_k_coords = k_vec_all[vbm_k_idx]
+                cbm_k_coords = k_vec_all[cbm_k_idx]
+                gap_type = "Direct" if vbm_k_idx == cbm_k_idx else "Indirect"
+                print(f"        Band Character:    {gap_type}")
+                print(f"         Band Gap (eV):    {gap:.4f}")
+                print(f"Eigenvalue of VBM (eV):    {vbm+e_fermi:.4f}")
+                print(f"Eigenvalue of CBM (eV):    {cbm+e_fermi:.4f}")
+                print(f"     HOMO & LUMO Bands:        {n_occ}        {n_occ + 1}")
+                print(f"       Location of VBM:  {vbm_k_coords[0]:.6f}  {vbm_k_coords[1]:.6f}  {vbm_k_coords[2]:.6f}")
+                print(f"       Location of CBM:  {cbm_k_coords[0]:.6f}  {cbm_k_coords[1]:.6f}  {cbm_k_coords[2]:.6f}")
+                print("-" * 53)
+                #print('Plotting band structure ...')
+                # Pass n_occ to the plotting function for band color differentiation
+                plot_band_structure(k_dist, eigen_plot, k_node, current_label, node_index, 
+                                    os.path.join(save_dir, f'band_{idx+1}'), n_occ)
+            
+                # --- 4. Exporting Data to .dat File ---
+                # Remove LaTeX formatting from labels for raw text export
+                clean_labels = [lb.replace(r'$\mathrm{', '').replace('}$', '').strip() for lb in current_label]
                 with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
                     text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
-            
-                    formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
-                    text_file.write(f"# k_node: {formatted_nodes}\n")
-            
-                    total_nk_points = len(k_dist)
-                    break_indices = node_index[1:] 
-
+                    text_file.write(f"# k_node: {' '.join([f'{kn:.6f}' for kn in k_node])}\n")
+                
+                    break_indices = node_index[1:]
                     for nb in range(len(eigen_plot)):
-                        for ik in range(total_nk_points):
+                        for ik in range(len(k_dist)):
                             text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
                         
+                            # Handle discontinuities in the K-path (high-symmetry points)
                             if ik in break_indices[:-1]:
                                 text_file.write('\n')
                                 text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                        # Add extra newline between bands for Gnuplot/standard compatibility
                         text_file.write('\n')
 
                 end_time = time.time()
                 elapsed_time = end_time - start_time
         
-                print("-" * 36)
                 print(f"Started at: {time.ctime(start_time)}")
                 print(f"Ended at: {time.ctime(end_time)}")
                 print(f"Total time: {elapsed_time:.2f} s")
-                print("-" * 36)
+                print("-" * 53)
     
     else:
         # Calculate the length of H for each structure
@@ -623,27 +688,24 @@ def main():
         
             # Initialize k_path and lable        
             if auto_mode:
-                kpath_seek = KPathSeek(structure = struct)
+                kpath_seek = KPathSeek(structure=struct)
                 klabels = []
-                for lbs in kpath_seek.kpath['path']:
-                    klabels += lbs
-                # remove adjacent duplicates   
+                for lbs in kpath_seek.kpath['path']: klabels += lbs
                 res = [klabels[0]]
                 [res.append(x) for x in klabels[1:] if x != res[-1]]
-                klabels = res
-                k_path = [kpath_seek.kpath['kpoints'][k] for k in klabels]
-                label = [rf'${lb}$' for lb in klabels]     
+                current_k_path = [kpath_seek.kpath['kpoints'][k] for k in res]
+                current_label = [rf'$\mathrm{{{lb.replace("GAMMA","Γ")}}}$' for lb in res]
             else:
-                k_path, label = manual_k_info
+                current_k_path, current_label = k_path_coords, k_labels
         
             orb_mask = basis_definition[species].reshape(-1) # shape: [natoms*nao_max] 
             orb_mask = orb_mask[:,None] * orb_mask[None,:]       # shape: [natoms*nao_max, natoms*nao_max]
         
-            kpts=kpoints_generator(dim_k=3, lat=latt)
-            k_vec, k_dist, k_node, lat_per_inv, node_index = kpts.k_path(k_path, nk)
+            kpts_gen = kpoints_generator(dim_k=3, lat=latt)
+            k_vec_all, k_dist, k_node, lat_per_inv, node_index = kpts_gen.k_path(current_k_path, nk)
         
-            k_vec = k_vec.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
-            k_vec = k_vec.reshape(-1,3) # shape (nk, 3)
+            k_vec_all = k_vec_all.dot(lat_per_inv[np.newaxis,:,:]) # shape (nk,1,3)
+            k_vec_all = k_vec_all.reshape(-1,3) # shape (nk, 3)
         
             natoms = len(struct)
             eigen = []
@@ -655,7 +717,7 @@ def main():
                 HK[na,na,:,:] +=  Hon[na,:,:] # shape (natoms, nao_max, nao_max)
                 SK[na,na,:,:] +=  Son[na,:,:]
             
-                coe = np.exp(2j*np.pi*np.sum(nbr_shift*k_vec[ik][None,:], axis=-1)) # shape (nedges,)
+                coe = np.exp(2j*np.pi*np.sum(nbr_shift*k_vec_all[ik][None,:], axis=-1)) # shape (nedges,)
             
                 for iedge in range(len(Hoff)):
                     # shape (nao_max, nao_max) += (1, 1)*(nao_max, nao_max)
@@ -690,55 +752,93 @@ def main():
                 orbital_energies = orbital_energies.squeeze(0)
                 eigen.append(orbital_energies.cpu().numpy())
             
-            eigen = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
+            all_eigen_raw = np.swapaxes(np.array(eigen), 0, 1)*au2ev # (nbands, nk)
             
             # plot fermi line    
             num_electrons = np.sum(num_val[species])
-            max_val = np.max(eigen[math.ceil(num_electrons/2)-1])
-            min_con = np.min(eigen[math.ceil(num_electrons/2)])
-            eigen = eigen - max_val
-            print(f"max_val = {max_val} eV")
-            print(f"band gap = {min_con - max_val} eV")
             
-            if nk > 1:
-                    print('Plotting band structure ...')
-                    save_path = os.path.join(save_dir, f'band_{idx+1}')
-                    plot_band_structure(k_dist, eigen, k_node, label, node_index, save_path)
-                    print('Done.\n')
+            # --- 1. Fermi Level Calculation ---
+            # Determine target electron count; if SOC is off, divide by 2 for spin degeneracy
+            target_nelec = num_electrons if soc_switch else num_electrons / 2.0
+            elw, eup = np.min(all_eigen_raw) - 1.0, np.max(all_eigen_raw) + 1.0
             
-            # Export energy band data
-            clean_labels = []
-            eigen_plot = eigen
-            for lb in label:
-                c_lb = lb.replace(r'$\mathrm{', '').replace('}$', '').strip()
-                clean_labels.append(c_lb)
+            # Solve for Fermi Level using Bisection Method
+            for i in range(100): 
+                ef_test = (elw + eup) / 2.0
+                sigma = 0.01  # Smearing width in eV
+                occupancy = get_fermi_weight(all_eigen_raw - ef_test, kt=sigma)
+                total_n = np.sum(occupancy) / len(k_dist)
+                
+                if total_n < target_nelec:
+                    elw = ef_test
+                else:
+                    eup = ef_test
             
+            e_fermi = (elw + eup) / 2.0
+
+            # Shift all eigenvalues relative to the calculated Fermi Level
+            eigen_plot = all_eigen_raw - e_fermi
+
+            # --- 2. Identify Occupied Band Indices ---
+            n_occ = int(round(target_nelec))
+            # vb_band (Valence Band) is the n_occ-th band (index n_occ-1)
+            # cb_band (Conduction Band) is the (n_occ+1)-th band (index n_occ)
+            vb_band = eigen_plot[n_occ - 1, :]
+            cb_band = eigen_plot[n_occ, :]
+
+            vbm = np.max(vb_band)
+            cbm = np.min(cb_band)
+            gap = cbm - vbm
+
+            # Find the indices for VBM/CBM along the K-path
+            vbm_k_idx = np.argmax(vb_band)
+            cbm_k_idx = np.argmin(cb_band)
+
+            # --- 3. Auto-detect System Type and Printing ---
+            print("-" * 53)
+            print(f"Calculated Fermi Level: {e_fermi:.6f} eV")
+            vbm_k_coords = k_vec_all[vbm_k_idx]
+            cbm_k_coords = k_vec_all[cbm_k_idx]
+            gap_type = "Direct" if vbm_k_idx == cbm_k_idx else "Indirect"
+            print(f"        Band Character:    {gap_type}")
+            print(f"         Band Gap (eV):    {gap:.4f}")
+            print(f"Eigenvalue of VBM (eV):    {vbm+e_fermi:.4f}")
+            print(f"Eigenvalue of CBM (eV):    {cbm+e_fermi:.4f}")
+            print(f"     HOMO & LUMO Bands:        {n_occ}        {n_occ + 1}")
+            print(f"       Location of VBM:  {vbm_k_coords[0]:.6f}  {vbm_k_coords[1]:.6f}  {vbm_k_coords[2]:.6f}")
+            print(f"       Location of CBM:  {cbm_k_coords[0]:.6f}  {cbm_k_coords[1]:.6f}  {cbm_k_coords[2]:.6f}")
+            print("-" * 53)
+            #print('Plotting band structure ...')
+            # Pass n_occ to the plotting function for band color differentiation
+            plot_band_structure(k_dist, eigen_plot, k_node, current_label, node_index, 
+                                os.path.join(save_dir, f'band_{idx+1}'), n_occ)
+            
+            # --- 4. Exporting Data to .dat File ---
+            # Remove LaTeX formatting from labels for raw text export
+            clean_labels = [lb.replace(r'$\mathrm{', '').replace('}$', '').strip() for lb in current_label]
             with open(os.path.join(save_dir, f'band_{idx+1}.dat'), "w") as text_file:
                 text_file.write(f"# k_label: {' '.join(clean_labels)}\n")
-            
-                formatted_nodes = "  ".join([f"{kn:.6f}" for kn in k_node])
-                text_file.write(f"# k_node: {formatted_nodes}\n")
-            
-                total_nk_points = len(k_dist)
-                break_indices = node_index[1:] 
-
+                text_file.write(f"# k_node: {' '.join([f'{kn:.6f}' for kn in k_node])}\n")
+                
+                break_indices = node_index[1:]
                 for nb in range(len(eigen_plot)):
-                    for ik in range(total_nk_points):
+                    for ik in range(len(k_dist)):
                         text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
                         
+                        # Handle discontinuities in the K-path (high-symmetry points)
                         if ik in break_indices[:-1]:
                             text_file.write('\n')
                             text_file.write("%f    %f\n" % (k_dist[ik], eigen_plot[nb, ik]))
+                    # Add extra newline between bands for Gnuplot/standard compatibility
                     text_file.write('\n')
 
             end_time = time.time()
             elapsed_time = end_time - start_time
         
-            print("-" * 36)
             print(f"Started at: {time.ctime(start_time)}")
             print(f"Ended at: {time.ctime(end_time)}")
             print(f"Total time: {elapsed_time:.2f} s")
-            print("-" * 36)
+            print("-" * 53)
 
 if __name__ == '__main__':
     main()
