@@ -2,8 +2,8 @@
 /*
  * @Author: Yang Zhong 
  * @Date: 2021-10-12 23:42:11 
- * @Last Modified by: Yang Zhong
- * @Last Modified time: 2021-11-07 19:15:27
+ * @Last Modified by: Hao-Jen You
+ * @Last Modified time: 2026-02-02 09:38:00
  */
  """
 import os
@@ -219,12 +219,23 @@ def setup_trainer(config, callbacks):
     # ---- accelerator / devices ----
     num_gpus = getattr(config.setup, "num_gpus", 0)
 
-    if num_gpus > 0:
+    # 1. Determine accelerator and devices mapping
+    if num_gpus is None:
+        accelerator = "cpu"
+        devices = 1
+        device_count = 0
+    elif isinstance(num_gpus, list):
         accelerator = "gpu"
         devices = num_gpus
+        device_count = len(num_gpus)
+    elif isinstance(num_gpus, int) and num_gpus > 0:
+        accelerator = "gpu"
+        devices = num_gpus
+        device_count = num_gpus
     else:
         accelerator = "cpu"
         devices = 1
+        device_count = 0
 
     # ---- precision mapping ----
     precision = config.setup.precision
@@ -246,7 +257,8 @@ def setup_trainer(config, callbacks):
     }
 
     # ---- DDP strategy (optional but recommended) ----
-    if num_gpus > 1:
+    # Use device_count (integer) for comparison to avoid TypeError with lists
+    if device_count > 1:
         trainer_params["strategy"] = "ddp_find_unused_parameters_true"
 
     trainer = pl.Trainer(**trainer_params)
@@ -497,5 +509,4 @@ def HamGNN():
 
 if __name__ == '__main__':
     HamGNN()
-
 
