@@ -120,12 +120,12 @@ representation_nets:
 
 setup:
   GNN_Net: HamGNNpre
-  accelerator: null
+  accelerator: "gpu" # "cpu" or "gpu"
   ignore_warnings: true
   checkpoint_path: null # Path to the model weights file
   load_from_checkpoint: False
   resume: False
-  num_gpus: 1 # null: use cpu; [i]: use the ith GPU device
+  num_gpus: [0] # 0: use cpu; [i]: use the ith GPU device
   precision: 32
   property: hamiltonian
   stage: fit # fit: training; test: inference
