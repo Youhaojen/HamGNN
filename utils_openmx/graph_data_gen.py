@@ -4,7 +4,7 @@ version: 0.1
 Author: Yang Zhong
 Date: 2022-11-24 19:07:54
 LastEditors: Hao-Jen You
-LastEditTime: 2026-01-27 21:00:00
+LastEditTime: 2026-02-17 13:00:00
 '''
 
 import json
@@ -99,8 +99,14 @@ def main():
                     print(f"Skipping: Lattice block not found in {f_dat}")
                     continue
                 
-                # Convert the extracted block into a list of floats
-                latt_raw = [float(x) for x in latt_block.group('vec').split()]
+                # Filter out strings that aren't numbers (like '#', 'unit=Ang.', etc.)
+                latt_raw = []
+                for x in latt_block.group('vec').split():
+                    try:
+                        latt_raw.append(float(x))
+                    except ValueError:
+                        continue
+
                 if len(latt_raw) != 9:
                     print(f"Error: Lattice vectors should have 9 numbers, found {len(latt_raw)}")
                     continue
@@ -116,6 +122,8 @@ def main():
                 species = []
                 coords_list = []
                 for line in lines:
+                    # Strip comments starting with '#'
+                    clean_line = line.split('#')[0].strip()
                     parts = line.split()
                     if len(parts) < 5: continue # Skip invalid or empty lines
                     
